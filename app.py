@@ -9,8 +9,8 @@ from pydantic import BaseModel, ValidationError, conint, confloat
 from pathlib import Path
 from dotenv import load_dotenv
 from langfuse import Langfuse
-#from langfuse.decorators import observe
 from langfuse.openai import OpenAI as LangfuseOpenAI
+import re
 
 
 # === KONFIG ===
@@ -205,30 +205,28 @@ def extract_with_llm(text: str) -> dict:
         }
     }
 
-    # sys = (
-    #     "Wyodrębnij 'plec' (K/M), 'wiek' (w latach) oraz 'czas_5km' w **SEKUNDACH**.\n"
-    #     "Użytkownik może podawać czas w minutach (np. '33 min'), w formacie 'MM:SS' albo 'HH:MM:SS'.\n"
-    #     "Zawsze przelicz na sekundy i zwróć WYŁĄCZNIE JSON zgodny ze schematem.\n"
-    #     "Jeśli którejkolwiek informacji NIE podano wprost, zwróć wartość null (NIE zgaduj).\n"
-    #     "Przykłady:\n"
-    #     " - 'kobieta, 34 lata, 5 km 27:30' → {\"plec\":\"K\",\"wiek\":34,\"czas_5km\":1650}\n"
-    #     " - 'M 40 lat, 5 km w 33 min'     → {\"plec\":\"M\",\"wiek\":40,\"czas_5km\":1980}\n"
-    #     " - 'K 19, 5km w 18m45s'          → {\"plec\":\"K\",\"wiek\":19,\"czas_5km\":1125}\n"
-    #     " - 'Mam 40 lat, 5 km w 25:10' → {"plec": null, "wiek": 40, "czas_5km": 1510}\n"
-    # )
-        
     sys = """
-    Wyodrębnij 'plec' (K/M), 'wiek' (w latach) oraz 'czas_5km' w **SEKUNDACH**.
-    Użytkownik może podawać czas w minutach (np. '33 min'), w formacie 'MM:SS' albo 'HH:MM:SS'.
+    Wyodrębnij 'plec' (K/M), 'wiek' (w latach) oraz 'czas_5km' w SEKUNDACH.
+    Użytkownik może podać czas w minutach (np. '33 min'), w formacie 'MM:SS' albo 'HH:MM:SS'.
     Zawsze przelicz na sekundy i zwróć WYŁĄCZNIE JSON zgodny ze schematem.
     Jeśli którejkolwiek informacji NIE podano wprost, zwróć wartość null (NIE zgaduj).
 
+    MAPOWANIE PŁCI:
+    - Jeśli pada 'mężczyzna', 'facet', 'chłopak', 'pan' → zwróć "M".
+    - Jeśli pada 'kobieta', 'dziewczyna', 'pani' → zwróć "K".
+    - Jeśli użytkownik poda imię męskie (np. 'Jestem Piotrek/Piotr/Paweł/Marcin/Adam') → "M".
+    - Jeśli użytkownik poda imię żeńskie (np. 'Jestem Ania/Anna/Kasia/Joanna/Magda') → "K".
+    - W razie niejednoznaczności → null.
+
     Przykłady:
-    - 'kobieta, 34 lata, 5 km 27:30'   → {"plec":"K","wiek":34,"czas_5km":1650}
-    - 'M 40 lat, 5 km w 33 min'        → {"plec":"M","wiek":40,"czas_5km":1980}
-    - 'K 19, 5km w 18m45s'             → {"plec":"K","wiek":19,"czas_5km":1125}
-    - 'Mam 40 lat, 5 km w 25:10'       → {"plec": null, "wiek":40,"czas_5km":1510}
+    - 'kobieta, 34 lata, 5 km 27:30'            → {"plec":"K","wiek":34,"czas_5km":1650}
+    - 'M 40 lat, 5 km w 33 min'                  → {"plec":"M","wiek":40,"czas_5km":1980}
+    - 'Jestem Piotrek, 47 lat, 5 km 40 min'      → {"plec":"M","wiek":47,"czas_5km":2400}
+    - 'Jestem Ania, 19 lat, 5km w 18m45s'        → {"plec":"K","wiek":19,"czas_5km":1125}
+    - 'Mam 40 lat, 5 km w 25:10'                 → {"plec": null, "wiek":40,"czas_5km":1510}
     """
+        
+    
 
     resp = client.chat.completions.create(
         model=os.getenv("OPENAI_MODEL","gpt-4o-mini"),
@@ -259,7 +257,28 @@ def fmt_time(sec: float) -> str:
         return f"{h}:{m:02d}:{s:02d}"
     else:
         return f"{m}:{s:02d}"
-         
+
+def infer_gender_from_text(text: str) -> str | None:
+    t = text.lower()
+    male_kw = ["mężczyzna","mezczyzna","facet","chłopak","chlopak","pan"]
+    female_kw = ["kobieta","dziewczyna","pani"]
+
+    if any(k in t for k in male_kw): 
+        return "M"
+    if any(k in t for k in female_kw):
+        return "K"
+
+    # prosta heurystyka po imieniu: "jestem <imię>" lub "nazywam się <imię>"
+    m = re.search(r"(jestem|nazywam się|nazywam sie)\s+([A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż\-]+)", text, flags=re.I)
+    if m:
+        name = m.group(2)
+        # wyjątki imion męskich na -a
+        male_exceptions = {"Kuba","Barnaba","Kosma","Bonawentura","Ilya","Sasza","Nikita"}
+        if name in male_exceptions or not name.endswith("a"):
+            return "M"
+        else:
+            return "K"
+    return None         
 
 # === UI ===
 
@@ -281,8 +300,13 @@ if st.button("Policz", key="policz_main"):
 
 
     try:
-        # --- Twoje przetwarzanie ---
         data_raw = extract_with_llm(text)
+        
+        plec = data_raw.get("plec")
+        if plec not in {"K","M"}:
+            guessed = infer_gender_from_text(text)
+            if guessed:
+                data_raw["plec"] = guessed
         for k in REQUIRED:
             if not data_raw.get(k):
                 raise ValueError(f"missing:{k}")
