@@ -1,0 +1,19 @@
+name: zad_dom_mod_9
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pandas
+  - numpy
+  - scikit-learn
+  - joblib
+  - boto3
+  - pydantic
+  - pip
+  - pip:
+      - streamlit
+      - plotly
+      - openai
+      - langfuse
+      - python-dotenv
