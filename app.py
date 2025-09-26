@@ -18,6 +18,8 @@ import re
 
 load_dotenv(Path(__file__).parent / ".env", override=True) 
 
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+
 client = LangfuseOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 BUCKET = os.getenv("SPACES_BUCKET")                 
@@ -298,37 +300,90 @@ if st.button("Policz", key="policz_main"):
     lf = get_langfuse()
     trace = lf_start_trace(lf, name="predykcja", input={"raw_text": text})
 
-
     try:
+        # DEBUG – pokaż, czy env vars są widoczne
+        if DEBUG:
+            st.info({
+                "HAS_OPENAI_KEY": bool(os.getenv("OPENAI_API_KEY")),
+                "HAS_LANGFUSE_PUB": bool(os.getenv("LANGFUSE_PUBLIC_KEY")),
+                "HAS_LANGFUSE_SEC": bool(os.getenv("LANGFUSE_SECRET_KEY")),
+                "BUCKET": os.getenv("SPACES_BUCKET"),
+                "MODEL_KEY_env": os.getenv("MODEL_KEY"),
+                "LATEST_KEY_env": os.getenv("LATEST_KEY"),
+            })
+
+        # 1) Parsowanie LLM
         data_raw = extract_with_llm(text)
-        
+
+        # DEBUG – pokaż co zwrócił LLM
+        if DEBUG:
+            st.code(f"LLM parsed: {json.dumps(data_raw, ensure_ascii=False)}", language="json")
+
+        # 2) Heurystyka płci po LLM (opcjonalnie, jeśli dodałaś funkcję)
         plec = data_raw.get("plec")
         if plec not in {"K","M"}:
             guessed = infer_gender_from_text(text)
             if guessed:
                 data_raw["plec"] = guessed
+
+        # 3) Twarda walidacja
         for k in REQUIRED:
             if not data_raw.get(k):
                 raise ValueError(f"missing:{k}")
+
         data = Inputs(**data_raw)
 
+        # 4) Predykcja
         model, model_key = load_model()
         X = to_features(data)
         y_sec = float(model.predict(X)[0])
 
-        # --- wynik dla użytkownika ---
         st.success(f"Szacowany wynik: {y_sec/60:.1f} min ({fmt_time(y_sec)})")
         st.caption(f"Model: {model_key}")
 
-        # --- zapis do Langfuse ---
         if trace:
             trace.update(output={"pred": y_sec, "model_key": model_key})
             lf.flush()
 
     except Exception as e:
-        st.error("Nie udało się policzyć wyniku, sprawdź czy wszystkie potrzebne dane zostały wprowadzone.")
+        if DEBUG:
+            st.exception(e)
+        else:
+            st.error("Nie udało się policzyć wyniku, sprawdź czy wszystkie potrzebne dane zostały wprowadzone.")
         if trace:
             trace.update(tags=["error"], output={"error": str(e)})
             lf.flush()
+                
+    # try:
+    #     data_raw = extract_with_llm(text)
+        
+    #     plec = data_raw.get("plec")
+    #     if plec not in {"K","M"}:
+    #         guessed = infer_gender_from_text(text)
+    #         if guessed:
+    #             data_raw["plec"] = guessed
+    #     for k in REQUIRED:
+    #         if not data_raw.get(k):
+    #             raise ValueError(f"missing:{k}")
+    #     data = Inputs(**data_raw)
+
+    #     model, model_key = load_model()
+    #     X = to_features(data)
+    #     y_sec = float(model.predict(X)[0])
+
+    #     # --- wynik dla użytkownika ---
+    #     st.success(f"Szacowany wynik: {y_sec/60:.1f} min ({fmt_time(y_sec)})")
+    #     st.caption(f"Model: {model_key}")
+
+    #     # --- zapis do Langfuse ---
+    #     if trace:
+    #         trace.update(output={"pred": y_sec, "model_key": model_key})
+    #         lf.flush()
+
+    # except Exception as e:
+    #     st.error("Nie udało się policzyć wyniku, sprawdź czy wszystkie potrzebne dane zostały wprowadzone.")
+    #     if trace:
+    #         trace.update(tags=["error"], output={"error": str(e)})
+    #         lf.flush()
 
 
