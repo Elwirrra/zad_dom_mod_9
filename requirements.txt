@@ -8,4 +8,5 @@ langfuse
 pydantic
 python-dotenv
 langfuse
-
+pycaret==3.3.*
+numpy<2
